@@ -1,0 +1,326 @@
+library(survminer)
+library(survival)
+library(stringr)
+library(tidyverse)
+library(cowplot)
+require("survival")
+
+outDir <- file.path("KM_curves/")
+if(!dir.exists(outDir)) dir.create(outDir,recursive=TRUE)
+
+hi_lo_array <- read.table("ANNOT_FILE.csv", sep = ",", header = 1, row.names = 1)
+survData <- read.table("SURV_DATA.csv", sep = ",", header = 1, row.names = 1)
+colnames(hi_lo_array) <- gsub('\\.', '-', colnames(hi_lo_array)) 
+
+
+rm_rows <- vector()
+for(i in row.names(survData)){
+  res <- which(colnames(hi_lo_array) == i)
+  if(length(res)>0){
+    next
+  }
+  else{
+    rm_rows <- cbind(rm_rows, i)
+  }
+}
+
+survData <- survData[!(row.names(survData) %in% rm_rows),]
+
+# make numerical
+survData[,1] <- gsub("0:LIVING", 0, survData[,1])
+survData[,1] <- gsub("1:DECEASED", 1, survData[,1])
+
+na_string <- c("NA", "Not_Applicable", "[Not Available]", "[Not Applicable]",
+               "[Unknown]","[Not Evaluated]")
+survData[sapply(survData, `%in%`, na_string)] <- NA
+
+survData[,3] <- gsub("Recurred/Progressed", 1, survData[,3])
+survData[,3] <- gsub("DiseaseFree", 0, survData[,3])
+
+# NA for error catch later
+for(i in 1:nrow(survData)){
+  if(is.na(survData[i,2])) survData[i,1] <- NA
+  if(is.na(survData[i,4])) survData[i,3] <- NA
+}
+
+survData[,1] <- readr::parse_number(as.character(survData[,1]))
+survData[,2] <- readr::parse_number(as.character(survData[,2]))
+survData[,3] <- readr::parse_number(as.character(survData[,3]))
+survData[,4] <- readr::parse_number(as.character(survData[,4]))
+
+# REMOVE pIDs without survival data here #
+#hi_lo_array[, 307] <- NULL
+hi_lo_colname_ALL <- colnames(hi_lo_array)
+
+# OS KM curve
+Hi_pct_os_array = data.frame(matrix(NA, nrow = ncol(hi_lo_array), ncol = 2))
+Lo_pct_os_array = data.frame(matrix(NA, nrow = ncol(hi_lo_array), ncol = 2))
+
+#hi_lo_colname_ALL <- sub(sprintf("^((.*?-){%d}.*?)-.*", 2), "\\1", hi_lo_colname_ALL)
+
+hi_store <- vector()
+hi_store <- append(hi_store, "dummy") # disallow addition of duplicate patient IDs
+lo_store <- vector()
+lo_store <- append(lo_store, "dummy") # disallow addition of duplicate patient IDs
+
+
+for(c in 1:nrow(hi_lo_array)){
+  
+  for(d in 1:ncol(hi_lo_array)){
+    if(hi_lo_array[c,d] == 1){
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], hi_store, fixed=TRUE)) != 0){ 
+        hi_store <- head(hi_store,-1)
+        next}
+      
+      hi_store <- append(hi_store, hi_lo_colname_ALL[d])
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], lo_store, fixed=TRUE)) != 0){
+        hi_store <- head(hi_store,-1)
+        next}
+      
+      hi_lo_rowname <- hi_lo_colname_ALL[d]
+      surv_idx <- which(row.names(survData) == hi_lo_rowname)
+      Hi_pct_os_array[d,1] <- survData[surv_idx, 1] # status
+      Hi_pct_os_array[d,2] <- survData[surv_idx, 2] # time
+    }
+    
+    if(hi_lo_array[c,d] == 0){
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], lo_store, fixed=TRUE)) != 0){
+        lo_store <- head(lo_store,-1)
+        next}
+      
+      lo_store <- append(lo_store, hi_lo_colname_ALL[d])
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], hi_store, fixed=TRUE)) != 0){ 
+        lo_store <- head(lo_store,-1)
+        next}
+      
+      
+      hi_lo_rowname <- hi_lo_colname_ALL[d]
+      surv_idx <- which(row.names(survData) == hi_lo_rowname)
+      Lo_pct_os_array[d,1] <- survData[surv_idx, 1] # status
+      Lo_pct_os_array[d,2] <- survData[surv_idx, 2] # time
+    }
+    
+  }
+  
+  # reset store
+  hi_store <- vector()
+  hi_store <- append(hi_store, "dummy") # disallow addition of duplicate patient IDs
+  lo_store <- vector()
+  lo_store <- append(lo_store, "dummy") # disallow addition of duplicate patient IDs
+  
+  Hi_pct_os_array <- na.omit(Hi_pct_os_array)
+  colnames(Hi_pct_os_array)[1] <- "Status"
+  colnames(Hi_pct_os_array)[2] <- "Time"
+  Hi_pct_os_array$GROUP <- "NAME"
+  
+  os_survData <- survData$vital_status
+  
+  if(nrow(Hi_pct_os_array) != length(os_survData[!is.na(os_survData)])){
+    
+    Lo_pct_os_array <- na.omit(Lo_pct_os_array)
+    colnames(Lo_pct_os_array)[1] <- "Status"
+    colnames(Lo_pct_os_array)[2] <- "Time"
+    Lo_pct_os_array$GROUP <- "NAME2"
+    
+    
+    merged_os <- rbind(Hi_pct_os_array, Lo_pct_os_array)
+    
+    fit <- survfit(Surv(Time, Status) ~ GROUP, data = merged_os)
+    KMwithStats <- ggsurvplot(fit, data = merged_os,
+                         censor.shape="|", 
+                         censor.size = 3,
+                         pval = TRUE,
+                         xlab = "Days Elapsed",
+                         risk.table = TRUE,
+                         risk.table.y.text = FALSE,
+                         legend.title="",
+                         #legend = "none",
+                         palette = c("808080","#000000")) 
+    KMwithStats$plot <- KMwithStats$plot + theme(legend.text = element_text(size = 14))
+    
+    KMwithoutStats <- ggsurvplot(fit, data = merged_os,
+                              censor.shape="|", 
+                              censor.size = 3,
+                              pval = FALSE,
+                              xlab = NULL,
+                              ylab = NULL,
+                              risk.table = FALSE,
+                              legend = "none",
+                              palette = c("808080","#000000"))
+    KMwithoutStats$plot <- KMwithoutStats$plot + 
+                  scale_y_continuous(breaks = c(0,0.5,1.0)) +
+                  scale_x_continuous(breaks = c(0,2500,5000)) +
+                  theme(axis.text.x = element_text(size = 18),
+                        axis.text.y = element_text(size = 18))
+    
+    # 1-50 possible hub genes, ugly but it works
+    if(c == 1) {pdf(file.path(outDir,"RESULTS.pdf"))
+      RESULTS <- KMwithoutStats} 
+    if(c == 2) {pdf(file.path(outDir,"2C_OS.pdf"))
+      C2_OS <- KMwithoutStats}
+    if(c == 3) {pdf(file.path(outDir,"2E_OS.pdf"))
+      E2_OS <- KMwithoutStats}
+    
+    dev.new()
+    
+    print(KMwithoutStats, newpage = FALSE)
+    ggsave(file.path(outDir,"RESULTS.jpg"),dpi = 300, width = 6.92, height = 5.88, units = "in")
+    dev.off()
+    
+    
+  }
+  #Hi_pct_os_array = data.frame(matrix(NA, nrow = nrow(hi_lo_array), ncol = 2))
+  #Lo_pct_os_array = data.frame(matrix(NA, nrow = nrow(hi_lo_array), ncol = 2))
+}
+
+print(fit, digits = 10)
+surv_pvalue(fit)$pval
+
+
+
+
+
+# DFS KM curve
+Hi_pct_DFS_array = data.frame(matrix(NA, nrow = ncol(hi_lo_array), ncol = 2))
+Lo_pct_DFS_array = data.frame(matrix(NA, nrow = ncol(hi_lo_array), ncol = 2))
+
+hi_lo_colname_ALL <- sub(sprintf("^((.*?-){%d}.*?)-.*", 2), "\\1", hi_lo_colname_ALL)
+
+hi_store <- vector()
+hi_store <- append(hi_store, "dummy") # disallow addition of duplicate patient IDs
+lo_store <- vector()
+lo_store <- append(lo_store, "dummy") # disallow addition of duplicate patient IDs
+
+
+for(c in 1:nrow(hi_lo_array)){
+  
+  for(d in 1:ncol(hi_lo_array)){
+    if(hi_lo_array[c,d] == 1){
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], hi_store, fixed=TRUE)) != 0){ 
+        hi_store <- head(hi_store,-1)
+        next}
+      
+      hi_store <- append(hi_store, hi_lo_colname_ALL[d])
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], lo_store, fixed=TRUE)) != 0){
+        hi_store <- head(hi_store,-1)
+        next}
+      
+      hi_lo_rowname <- hi_lo_colname_ALL[d]
+      surv_idx <- which(row.names(survData) == hi_lo_rowname)
+      Hi_pct_DFS_array[d,1] <- survData[surv_idx, 3] # status
+      Hi_pct_DFS_array[d,2] <- survData[surv_idx, 4] # time
+    }
+    
+    if(hi_lo_array[c,d] == 0){
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], lo_store, fixed=TRUE)) != 0){
+        lo_store <- head(lo_store,-1)
+        next}
+      
+      lo_store <- append(lo_store, hi_lo_colname_ALL[d])
+      
+      if(sum(1*grepl(hi_lo_colname_ALL[d], hi_store, fixed=TRUE)) != 0){ 
+        lo_store <- head(lo_store,-1)
+        next}
+      
+      
+      hi_lo_rowname <- hi_lo_colname_ALL[d]
+      surv_idx <- which(row.names(survData) == hi_lo_rowname)
+      Lo_pct_DFS_array[d,1] <- survData[surv_idx, 3] # status
+      Lo_pct_DFS_array[d,2] <- survData[surv_idx, 4] # time
+    }
+    
+  }
+  
+  # reset store
+  hi_store <- vector()
+  hi_store <- append(hi_store, "dummy") # disallow addition of duplicate patient IDs
+  lo_store <- vector()
+  lo_store <- append(lo_store, "dummy") # disallow addition of duplicate patient IDs
+  
+  Hi_pct_DFS_array <- na.omit(Hi_pct_DFS_array)
+  colnames(Hi_pct_DFS_array)[1] <- "Status"
+  colnames(Hi_pct_DFS_array)[2] <- "Time"
+  Hi_pct_DFS_array$GROUP <- "NAME"
+  
+  DFS_survData <- survData$DFS_STATUS
+  
+  if(nrow(Hi_pct_DFS_array) != length(DFS_survData[!is.na(DFS_survData)])){
+    
+    Lo_pct_DFS_array <- na.omit(Lo_pct_DFS_array)
+    colnames(Lo_pct_DFS_array)[1] <- "Status"
+    colnames(Lo_pct_DFS_array)[2] <- "Time"
+    Lo_pct_DFS_array$GROUP <- "NAME2"
+    
+    
+    merged_DFS <- rbind(Hi_pct_DFS_array, Lo_pct_DFS_array)
+    
+    fit <- survfit(Surv(Time, Status) ~ GROUP, data = merged_DFS)
+    KMwithStats <- ggsurvplot(fit, data = merged_DFS,
+                              censor.shape="|", 
+                              censor.size = 3,
+                              pval = TRUE,
+                              xlab = "Days Elapsed",
+                              risk.table = TRUE,
+                              legend = "none",
+                              palette = c("#808080", "#000000"))
+    
+    KMwithoutStats <- ggsurvplot(fit, data = merged_DFS,
+                                 censor.shape="|", 
+                                 censor.size = 3,
+                                 pval = FALSE,
+                                 xlab = NULL,
+                                 ylab = NULL,
+                                 risk.table = FALSE,
+                                 legend = "none",
+                                 palette = c("#808080", "#000000"))
+    
+    KMwithoutStats$plot  <- KMwithoutStats$plot+ 
+      scale_y_continuous(breaks = c(0,0.5,1.0)) +
+      scale_x_continuous(breaks = c(0,150,300)) +
+      theme(axis.text.x = element_text(size = 16),
+            axis.text.y = element_text(size = 16))
+    
+    # 1-50 possible hub genes, ugly but it works
+    if(c == 1) {pdf(file.path(outDir,"RESULTS.pdf"))
+      RESULTS <- KMwithoutStats} 
+    if(c == 2) {pdf(file.path(outDir,"2D_DFS.pdf"))
+      D2_DFS <- KMwithoutStats}
+    if(c == 3) {pdf(file.path(outDir,"2F_DFS.pdf"))
+      F2_DFS <- KMwithoutStats}
+    
+    print(KMwithoutStats, newpage = FALSE)
+    dev.off()
+  }
+  #Hi_pct_DFS_array = data.frame(matrix(NA, nrow = nrow(hi_lo_array), ncol = 2))
+  #Lo_pct_DFS_array = data.frame(matrix(NA, nrow = nrow(hi_lo_array), ncol = 2))
+}
+
+print(fit, digits = 10)
+surv_pvalue(fit)$pval
+
+
+
+splots <- list()
+# OS
+splots[[1]] <- pseudo_OSog
+splots[[3]] <- pseudo_OS
+splots[[5]] <- E3_OS
+
+# DFS
+splots[[2]] <- F4_DFSog
+splots[[4]] <- F4_DFS
+splots[[6]] <- F3_DFS
+
+res <- arrange_ggsurvplots(splots, print = FALSE,
+                           surv.plot.height = 1,
+                           risk.table.height = NULL,
+                           ncol = 2, nrow = 2)
+
+ggsave("Figure4.png", res, dpi = 300, width = 7, height = 5)
